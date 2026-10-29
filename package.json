@@ -1,0 +1,47 @@
+{
+  "name": "activation-poc",
+  "version": "1.0.0",
+  "description": "POC Activación de Servicios con Kafka - Sistemas Distribuidos 2026",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "libs/*"
+  ],
+  "scripts": {
+    "build": "npm run build:libs && npm run build:apps",
+    "build:libs": "npm run --workspace=libs/contracts build && npm run --workspace=libs/kafka-toolkit build",
+    "build:apps": "npm run --workspace=apps/activation-api build && npm run --workspace=apps/billing-service build && npm run --workspace=apps/provisioning-service build && npm run --workspace=apps/notification-service build && npm run --workspace=apps/crm-analytics-service build && npm run --workspace=apps/loyalty-service build && npm run --workspace=apps/demo-ui build",
+    "start:activation-api": "npm run --workspace=apps/activation-api start:dev",
+    "start:billing-service": "npm run --workspace=apps/billing-service start:dev",
+    "start:provisioning-service": "npm run --workspace=apps/provisioning-service start:dev",
+    "start:notification-service": "npm run --workspace=apps/notification-service start:dev",
+    "start:crm-analytics-service": "npm run --workspace=apps/crm-analytics-service start:dev",
+    "start:loyalty-service": "npm run --workspace=apps/loyalty-service start:dev",
+    "start:ui": "npm run --workspace=apps/demo-ui dev",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down -v",
+    "docker:scenario-3": "docker compose stop notification-service && echo 'Crear 3 activaciones ahora' && docker compose start notification-service",
+    "docker:scenario-4": "docker compose up -d --scale billing-service=2",
+    "docker:scenario-5": "docker compose --profile loyalty up -d loyalty-service"
+  },
+  "keywords": [
+    "kafka",
+    "distributed-systems",
+    "saga-pattern",
+    "choreography",
+    "nestjs",
+    "react",
+    "kraft",
+    "idempotency",
+    "dlq",
+    "outbox"
+  ],
+  "author": "Sistemas Distribuidos - 2026",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "rimraf": "^5.0.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3"
+  }
+}

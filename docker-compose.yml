@@ -1,0 +1,268 @@
+# =================================================================================================
+# ARCHIVO: docker-compose.yml
+# =================================================================================================
+# DESCRIPCIÓN DE LO REALIZADO EN ESTE ARCHIVO:
+# 1. Definición completa del entorno multicontenedor para la POC de Sistemas Distribuidos 2026.
+# 2. Infraestructura base:
+#    - `kafka`: Apache Kafka en modo KRaft (1 solo broker, sin dependencias de ZooKeeper) con healthcheck.
+#    - `kafka-init`: Contenedor efímero que ejecuta `docker/create-topics.sh` para crear los 4 tópicos
+#      principales y sus 4 DLQ con 3 particiones y retención de 7 días.
+#    - `kafka-ui`: Kafbat Kafka UI accesible en http://localhost:8080 para inspección visual en vivo.
+#    - `mongo`: Base de datos MongoDB en replica set de 1 nodo ('rs0') para habilitar transacciones
+#      y soporte del patrón Transactional Outbox.
+#    - `mongo-init`: Inicializador del replica set 'rs0'.
+#    - `mailhog`: Servidor SMTP simulado con interfaz web en http://localhost:8025.
+# 3. Microservicios del dominio:
+#    - `activation-api`: API REST, WebSocket Gateway y Agregador de la saga (puerto 3000).
+#    - `billing-service`: Facturación, fallo forzado y compensación (escalable horizontalmente con --scale).
+#    - `provisioning-service`: Aprovisionamiento de red con retardo de 1-3s.
+#    - `notification-service`: Despacho de emails de bienvenida y error a Mailhog.
+#    - `crm-analytics-service`: Consumidor puro de auditoría de todos los tópicos.
+#    - `loyalty-service`: Servicio bajo perfil 'loyalty' para demostrar el Escenario 5 (Replay con auto.offset.reset=earliest).
+#    - `demo-ui`: Frontend en React + Vite + Socket.IO accesible en http://localhost:5173.
+# 4. RNF-01: Todo el ecosistema se levanta sin pasos manuales mediante `docker compose up`.
+# =================================================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Apache Kafka Broker en modo KRaft
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: poc-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: '4L622nShTUiT8tCdRvtqTw'
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # 2. Inicializador de tópicos con 3 particiones y DLQs
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: poc-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./docker/create-topics.sh:/tmp/create-topics.sh
+    entrypoint: ["/bin/bash", "/tmp/create-topics.sh"]
+
+  # ---------------------------------------------------------------------------
+  # 3. Observabilidad Kafka UI (Kafbat)
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    container_name: poc-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kraft
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # 4. MongoDB en Replica Set (para soporte de Transacciones y Outbox)
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7.0
+    container_name: poc-mongo
+    ports:
+      - "27017:27017"
+    entrypoint: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --eval 'db.adminCommand(\"ping\")'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  mongo-init:
+    image: mongo:7.0
+    container_name: poc-mongo-init
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: >
+      bash -c "echo 'Iniciando réplica set rs0...';
+      mongosh --host mongo:27017 --eval 'try { rs.initiate({ _id: \"rs0\", members: [{ _id: 0, host: \"mongo:27017\" }] }) } catch(e) { rs.status() }';
+      echo 'Replica set inicializado con éxito!';"
+
+  # ---------------------------------------------------------------------------
+  # 5. Mailhog para simulación e inspección de Emails
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: poc-mailhog
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1025"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 6. Microservicio: activation-api (REST + WebSocket + Agregador)
+  # ---------------------------------------------------------------------------
+  activation-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: activation-api
+    container_name: poc-activation-api
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: activation-api
+      MONGO_URI: mongodb://mongo:27017/activation_db?replicaSet=rs0&directConnection=true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # 7. Microservicio: billing-service
+  # ---------------------------------------------------------------------------
+  billing-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: billing-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: billing-service
+      MONGO_URI: mongodb://mongo:27017/billing_db?replicaSet=rs0&directConnection=true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # 8. Microservicio: provisioning-service
+  # ---------------------------------------------------------------------------
+  provisioning-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: provisioning-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: provisioning-service
+      MONGO_URI: mongodb://mongo:27017/provisioning_db?replicaSet=rs0&directConnection=true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # 9. Microservicio: notification-service
+  # ---------------------------------------------------------------------------
+  notification-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: notification-service
+    container_name: poc-notification-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: notification-service
+      MONGO_URI: mongodb://mongo:27017/notification_db?replicaSet=rs0&directConnection=true
+      MAILHOG_HOST: mailhog
+      MAILHOG_PORT: 1025
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+      mailhog:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # 10. Microservicio: crm-analytics-service
+  # ---------------------------------------------------------------------------
+  crm-analytics-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: crm-analytics-service
+    container_name: poc-crm-analytics-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: crm-analytics-service
+      MONGO_URI: mongodb://mongo:27017/crm_db?replicaSet=rs0&directConnection=true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # 11. Microservicio opcional (Escenario 5): loyalty-service
+  # ---------------------------------------------------------------------------
+  loyalty-service:
+    profiles: ["loyalty"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args:
+        APP_NAME: loyalty-service
+    container_name: poc-loyalty-service
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: loyalty-service
+      MONGO_URI: mongodb://mongo:27017/loyalty_db?replicaSet=rs0&directConnection=true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # 12. Frontend UI en React + Vite
+  # ---------------------------------------------------------------------------
+  demo-ui:
+    build:
+      context: .
+      dockerfile: apps/demo-ui/Dockerfile
+    container_name: poc-demo-ui
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:3000
+    depends_on:
+      - activation-api

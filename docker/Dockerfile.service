@@ -1,0 +1,37 @@
+# =================================================================================================
+# ARCHIVO: docker/Dockerfile.service
+# =================================================================================================
+# DESCRIPCIÓN DE LO REALIZADO EN ESTE ARCHIVO:
+# 1. Dockerfile multipropósito para empaquetar cualquiera de los microservicios NestJS del monorepo:
+#    - activation-api
+#    - billing-service
+#    - provisioning-service
+#    - notification-service
+#    - crm-analytics-service
+#    - loyalty-service
+# 2. Utiliza el argumento de construcción `APP_NAME` para seleccionar la aplicación a compilar.
+# 3. Compila primero las librerías compartidas `@poc/contracts` y `@poc/kafka-toolkit`.
+# 4. Compila el código TypeScript del microservicio y arranca con `node dist/main.js`.
+# =================================================================================================
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copiar manifiestos para aprovechar el cache de capas de Docker
+COPY package*.json tsconfig*.json ./
+COPY libs ./libs
+COPY apps ./apps
+
+# Instalación y compilación
+RUN npm install
+RUN npm run build:libs
+
+ARG APP_NAME=activation-api
+ENV TARGET_APP=${APP_NAME}
+
+RUN npm run --workspace=apps/${TARGET_APP} build
+
+EXPOSE 3000
+
+CMD ["sh", "-c", "node apps/${TARGET_APP}/dist/main.js"]

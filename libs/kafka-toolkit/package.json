@@ -1,0 +1,23 @@
+{
+  "name": "@poc/kafka-toolkit",
+  "version": "1.0.0",
+  "description": "Librería compartida de resiliencia Kafka: Idempotencia, Reintentos, DLQ y Outbox transaccional",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.3.10",
+    "@nestjs/core": "^10.3.10",
+    "@nestjs/mongoose": "^10.0.10",
+    "@poc/contracts": "^1.0.0",
+    "kafkajs": "^2.2.4",
+    "mongoose": "^8.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "typescript": "^5.5.3"
+  }
+}
